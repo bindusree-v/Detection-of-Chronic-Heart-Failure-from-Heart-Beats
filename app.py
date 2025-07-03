@@ -1,74 +1,44 @@
-import joblib
-import numpy as np
+from flask import Flask, render_template, request, jsonify
+import os
 import librosa
-from flask import Flask, request, jsonify, render_template
+import numpy as np
+import pickle
 
 app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Load the trained model
-model = joblib.load("hb.pkl")
+# Load trained model
+with open("hb.pkl", "rb") as model_file:
+    model = pickle.load(model_file)
 
-# Function to extract exactly 131 features
-def extract_features(file):
-    y, sr = librosa.load(file, sr=22050)
+# Define disease categories
+CATEGORIES = ['normal_noisy', 'artifact', 'murmur', 'extrahls', 'Aunlabelledtest', 'normal']
 
-    # Extract MFCCs (124 features)
-    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=124)
-    mfccs_mean = np.mean(mfccs, axis=1)
+def extract_features(file_path, n_mfcc=13):
+    y, sr = librosa.load(file_path, sr=None)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+    return np.mean(mfccs, axis=1).reshape(1, -1)
 
-    # Extract additional features (7 more features)
-    zero_crossing = np.mean(librosa.feature.zero_crossing_rate(y))
-    spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
-    spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
-    chroma_stft = np.mean(librosa.feature.chroma_stft(y=y, sr=sr))
-    
-    # Additional features to reach 131
-    spectral_bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr))  # 1 feature
-    rms_energy = np.mean(librosa.feature.rms(y=y))  # 1 feature
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)  # 1 feature (beat tracking)
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-    # Combine all features (124 + 1 + 1 + 1 + 1 + 1 + 1 + 1 = 131)
-    features = np.hstack([
-        mfccs_mean, zero_crossing, spectral_centroid, spectral_rolloff, chroma_stft, 
-        spectral_bandwidth, rms_energy, tempo
-    ])
-    
-    return features.reshape(1, -1)
-
-@app.route("/")
-def home():
-    return render_template("index.html")
-
-@app.route("/predict", methods=["POST"])
+@app.route('/predict', methods=['POST'])
 def predict():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"})
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"})
+    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(file_path)
+    
+    # Extract features and predict
+    features = extract_features(file_path)
+    prediction_index = model.predict(features)[0]
+    prediction = CATEGORIES[int(prediction_index)]
+    return jsonify({"prediction": prediction})
 
-    file = request.files["file"]
-
-    if file.filename == "":
-        return jsonify({"error": "No selected file"}), 400
-
-    try:
-        # Extract features
-        features = extract_features(file)
-        print("Extracted Features Shape:", features.shape)  # Debugging
-
-        # Ensure the feature shape matches the model
-        if features.shape[1] != model.n_features_in_:
-            return jsonify({"error": f"Feature shape mismatch: Model expects {model.n_features_in_}, got {features.shape[1]}"}), 500
-
-        # Predict class
-        prediction = model.predict(features)[0]
-
-        # Convert prediction to label
-        label_map = {4: "normal", 3: "murmur", 0: "artifact", 2: "extrastole", 1: "extrahls"}
-        predicted_label = label_map.get(prediction, "Unknown")
-
-        return jsonify({"prediction": predicted_label})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run(debug=True)
